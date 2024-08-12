@@ -1,4 +1,5 @@
 Flask==2.3.3
-requests-oauthlib==1.6.1
+requests-oauthlib
 python-dotenv==1.0.0
 requests==2.31.0
+gunicorn==20.2.0
