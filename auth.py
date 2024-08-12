@@ -61,18 +61,42 @@ def get_oauth_session(state=None, token=None):
         token=token
     )
 
-@app.route('/')
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    """Redirect user to Twitter for authentication."""
-    username = request.args.get('username')
-    if not username:
-        return "Username parameter is required.", 400
-
-    oauth = get_oauth_session()
-    authorization_url, state = oauth.authorization_url(AUTHORIZATION_BASE_URL)
-    session['oauth_state'] = state
-    session['username'] = username
-    return redirect(authorization_url)
+    """Handle user login and redirect to Twitter for authentication."""
+    if request.method == 'POST':
+        username = request.form.get('username')
+        if not username:
+            return "Username is required.", 400
+        
+        # Create an OAuth session
+        oauth = get_oauth_session()
+        authorization_url, state = oauth.authorization_url(AUTHORIZATION_BASE_URL)
+        session['oauth_state'] = state
+        session['username'] = username
+        
+        # Redirect user to Twitter for authentication
+        return redirect(authorization_url)
+    
+    # Render login form
+    return '''
+        <!doctype html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Twitter Login</title>
+        </head>
+        <body>
+            <h2>Login to Twitter</h2>
+            <form method="POST" action="/">
+                <label for="username">Username:</label><br>
+                <input type="text" id="username" name="username" required><br><br>
+                <input type="submit" value="Login">
+            </form>
+        </body>
+        </html>
+    '''
 
 @app.route('/callback')
 def callback():
@@ -84,7 +108,7 @@ def callback():
     username = session.get('username')
     if username:
         save_credentials(username, token)
-
+    
     return "Authentication successful! You can now use the app without reauthorization."
 
 @app.route('/protected')
@@ -96,7 +120,7 @@ def protected():
 
     credentials = load_credentials(username)
     if not credentials:
-        return redirect(url_for('index', username=username))
+        return redirect(url_for('index'))
 
     # Check if the access token is expired and refresh it if needed
     oauth = get_oauth_session(token=credentials)
@@ -110,8 +134,9 @@ def protected():
             else:
                 return "Failed to refresh token.", 401
 
-    # Use oauth to make API requests on behalf of the user
-    # Example: response = oauth.get('https://api.twitter.com/1.1/account/verify_credentials.json')
+    # Example API request (commented out)
+    # response = oauth.get('https://api.twitter.com/1.1/account/verify_credentials.json')
+    # return f"Protected content: {response.json()}"
 
     return "This is a protected area. You are authenticated!"
 
