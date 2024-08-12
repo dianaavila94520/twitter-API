@@ -1,85 +1,119 @@
-import json
 import os
-from requests_oauthlib import OAuth1Session
-from requests.exceptions import RequestException
+import json
+from flask import Flask, redirect, request, session, url_for
+from requests_oauthlib import OAuth2Session
+from dotenv import load_dotenv
 
-# File to save credentials
+# Load environment variables from .env file
+load_dotenv()
+
+# App configuration
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "your_secret_key")
+
+# OAuth 2.0 credentials
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:5000/callback")
+
+# Define the OAuth 2.0 endpoints
+AUTHORIZATION_BASE_URL = "https://api.twitter.com/oauth2/authorize"
+TOKEN_URL = "https://api.twitter.com/oauth2/token"
+REFRESH_URL = TOKEN_URL  # Twitter API may not use a separate refresh URL
+
 CREDENTIALS_FILE = "twitter_credentials.json"
 
-def authenticate():
-    """
-    Authenticates with Twitter API and saves the credentials to a file.
-    
-    Returns:
-        tuple: Contains consumer_key, consumer_secret, access_token, and access_token_secret.
-    """
-    consumer_key = os.environ.get("CONSUMER_KEY")
-    consumer_secret = os.environ.get("CONSUMER_SECRET")
-
-    if not consumer_key or not consumer_secret:
-        raise ValueError("Consumer key or consumer secret is missing. Ensure both are set in environment variables.")
-
-    # Check if credentials file exists and read credentials from it
+def save_credentials(username, credentials):
+    """Save credentials for a specific user to a JSON file."""
     if os.path.exists(CREDENTIALS_FILE):
-        try:
-            with open(CREDENTIALS_FILE, 'r') as file:
-                creds = json.load(file)
-                return (
-                    creds["consumer_key"],
-                    creds["consumer_secret"],
-                    creds["access_token"],
-                    creds["access_token_secret"]
-                )
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            raise RuntimeError(f"Error reading credentials file: {e}")
+        with open(CREDENTIALS_FILE, 'r') as file:
+            all_credentials = json.load(file)
+    else:
+        all_credentials = {}
+    
+    all_credentials[username] = credentials
+    
+    with open(CREDENTIALS_FILE, 'w') as file:
+        json.dump(all_credentials, file, indent=4)
 
-    # If credentials file doesn't exist, proceed with authentication
+def load_credentials(username):
+    """Load credentials for a specific user from the JSON file."""
+    if os.path.exists(CREDENTIALS_FILE):
+        with open(CREDENTIALS_FILE, 'r') as file:
+            all_credentials = json.load(file)
+            return all_credentials.get(username)
+    return None
+
+def refresh_access_token(oauth_session, refresh_token):
+    """Refresh access token using the refresh token."""
     try:
-        # Get request token
-        request_token_url = "https://api.twitter.com/oauth/request_token?oauth_callback=oob&x_auth_access_type=write"
-        oauth = OAuth1Session(consumer_key, client_secret=consumer_secret)
-        fetch_response = oauth.fetch_request_token(request_token_url)
+        token = oauth_session.refresh_token(REFRESH_URL, refresh_token=refresh_token, client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
+        return token
+    except Exception as e:
+        print(f"Error refreshing token: {e}")
+        return None
 
-        resource_owner_key = fetch_response.get("oauth_token")
-        resource_owner_secret = fetch_response.get("oauth_token_secret")
+def get_oauth_session(state=None, token=None):
+    return OAuth2Session(
+        CLIENT_ID,
+        redirect_uri=REDIRECT_URI,
+        state=state,
+        token=token
+    )
 
-        # Get authorization
-        base_authorization_url = "https://api.twitter.com/oauth/authorize"
-        authorization_url = oauth.authorization_url(base_authorization_url)
-        
-        print("Please go here and authorize:", authorization_url)
-        verifier = input("Paste the PIN here: ")
+@app.route('/')
+def index():
+    """Redirect user to Twitter for authentication."""
+    username = request.args.get('username')
+    if not username:
+        return "Username parameter is required.", 400
 
-        # Get the access token
-        access_token_url = "https://api.twitter.com/oauth/access_token"
-        oauth = OAuth1Session(
-            consumer_key,
-            client_secret=consumer_secret,
-            resource_owner_key=resource_owner_key,
-            resource_owner_secret=resource_owner_secret,
-            verifier=verifier
-        )
-        oauth_tokens = oauth.fetch_access_token(access_token_url)
+    oauth = get_oauth_session()
+    authorization_url, state = oauth.authorization_url(AUTHORIZATION_BASE_URL)
+    session['oauth_state'] = state
+    session['username'] = username
+    return redirect(authorization_url)
 
-        access_token = oauth_tokens["oauth_token"]
-        access_token_secret = oauth_tokens["oauth_token_secret"]
+@app.route('/callback')
+def callback():
+    """Handle the callback from Twitter and exchange authorization code for tokens."""
+    oauth = get_oauth_session(state=session['oauth_state'])
+    token = oauth.fetch_token(TOKEN_URL, client_secret=CLIENT_SECRET, authorization_response=request.url)
 
-        # Save the credentials to a file
-        with open(CREDENTIALS_FILE, 'w') as file:
-            json.dump({
-                "consumer_key": consumer_key,
-                "consumer_secret": consumer_secret,
-                "access_token": access_token,
-                "access_token_secret": access_token_secret
-            }, file)
+    # Save token for the user
+    username = session.get('username')
+    if username:
+        save_credentials(username, token)
 
-        return consumer_key, consumer_secret, access_token, access_token_secret
+    return "Authentication successful! You can now use the app without reauthorization."
 
-    except RequestException as e:
-        raise RuntimeError(f"Error during authentication: {e}")
+@app.route('/protected')
+def protected():
+    """A protected route that requires authentication."""
+    username = request.args.get('username')
+    if not username:
+        return "Username parameter is required.", 400
+
+    credentials = load_credentials(username)
+    if not credentials:
+        return redirect(url_for('index', username=username))
+
+    # Check if the access token is expired and refresh it if needed
+    oauth = get_oauth_session(token=credentials)
+    if oauth.token.is_expired():
+        refresh_token = credentials.get('refresh_token')
+        if refresh_token:
+            new_token = refresh_access_token(oauth, refresh_token)
+            if new_token:
+                save_credentials(username, new_token)
+                oauth = get_oauth_session(token=new_token)
+            else:
+                return "Failed to refresh token.", 401
+
+    # Use oauth to make API requests on behalf of the user
+    # Example: response = oauth.get('https://api.twitter.com/1.1/account/verify_credentials.json')
+
+    return "This is a protected area. You are authenticated!"
 
 if __name__ == '__main__':
-    try:
-        authenticate()
-    except Exception as e:
-        print(f"Authentication failed: {e}")
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
