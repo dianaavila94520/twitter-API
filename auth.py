@@ -122,4 +122,30 @@ def auth(username):
 @app.route('/callback/<username>')
 def callback(username):
     oauth_token = request.args.get('oauth_token')
-    oauth_verifier = request.args.get('oau
+    oauth_verifier = request.args.get('oauth_verifier')
+    
+    credentials = handle_callback(oauth_token, oauth_verifier, username)
+    
+    if credentials:
+        return f"User '{username}' successfully re-authenticated."
+    else:
+        return "Failed to authenticate user."
+
+@app.route('/protected/<username>')
+def protected(username):
+    credentials = load_credentials(username)
+    
+    if credentials and are_tokens_valid(credentials):
+        oauth = OAuth1Session(
+            credentials["consumer_key"],
+            client_secret=credentials["consumer_secret"],
+            resource_owner_key=credentials["access_token"],
+            resource_owner_secret=credentials["access_token_secret"]
+        )
+        response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
+        return response.json()
+    
+    return redirect(url_for('auth', username=username))
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
