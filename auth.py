@@ -55,13 +55,13 @@ def re_authenticate_user(username):
     
     try:
         fetch_response = oauth.fetch_request_token(request_token_url)
-        resource_owner_key = fetch_response.get("oauth_token")
-        resource_owner_secret = fetch_response.get("oauth_token_secret")
-        
-        session[f"{username}_resource_owner_key"] = resource_owner_key
-        session[f"{username}_resource_owner_secret"] = resource_owner_secret
+        session['resource_owner_key'] = fetch_response.get("oauth_token")
+        session['resource_owner_secret'] = fetch_response.get("oauth_token_secret")
+        session['username'] = username
         
         authorization_url = oauth.authorization_url("https://api.twitter.com/oauth/authorize")
+        print(f"Redirecting {username} to authorize the app: {authorization_url}")
+        
         return redirect(authorization_url)
     
     except Exception as e:
@@ -73,14 +73,11 @@ def handle_callback(oauth_token, oauth_verifier, username):
     consumer_key = get_env_variable("CONSUMER_KEY")
     consumer_secret = get_env_variable("CONSUMER_SECRET")
     
-    resource_owner_key = session.get(f"{username}_resource_owner_key")
-    resource_owner_secret = session.get(f"{username}_resource_owner_secret")
-    
     oauth = OAuth1Session(
         consumer_key,
         client_secret=consumer_secret,
-        resource_owner_key=resource_owner_key,
-        resource_owner_secret=resource_owner_secret
+        resource_owner_key=oauth_token,
+        resource_owner_secret=session['resource_owner_secret']
     )
     
     try:
@@ -104,14 +101,12 @@ def handle_callback(oauth_token, oauth_verifier, username):
 
 # Flask app initialization
 app = Flask(__name__)
-app.secret_key = get_env_variable("SECRET_KEY")  # Ensure this is set in your .env file
+app.secret_key = os.urandom(24)  # Secret key for session management
 
 @app.route('/')
 def index():
-    return "Welcome to the Twitter OAuth App. Please start authentication by visiting '/auth/<username>'."
-
-@app.route('/auth/<username>')
-def auth(username):
+    username = request.args.get('username', 'default_user')
+    
     credentials = load_credentials(username)
     if not credentials or not are_tokens_valid(credentials):
         # No valid tokens found, initiate re-authentication
@@ -119,11 +114,12 @@ def auth(username):
     
     return f"User '{username}' is authenticated. Ready to access Twitter API."
 
-@app.route('/callback/<username>')
-def callback(username):
+@app.route('/callback')
+def callback():
     oauth_token = request.args.get('oauth_token')
     oauth_verifier = request.args.get('oauth_verifier')
     
+    username = session.get('username', 'default_user')
     credentials = handle_callback(oauth_token, oauth_verifier, username)
     
     if credentials:
@@ -131,8 +127,9 @@ def callback(username):
     else:
         return "Failed to authenticate user."
 
-@app.route('/protected/<username>')
-def protected(username):
+@app.route('/protected')
+def protected():
+    username = request.args.get('username', 'default_user')
     credentials = load_credentials(username)
     
     if credentials and are_tokens_valid(credentials):
@@ -145,7 +142,7 @@ def protected(username):
         response = oauth.get("https://api.twitter.com/1.1/account/verify_credentials.json")
         return response.json()
     
-    return redirect(url_for('auth', username=username))
+    return redirect(url_for('index', username=username))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
