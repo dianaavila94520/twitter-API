@@ -3,3 +3,4 @@ requests-oauthlib
 python-dotenv==1.0.0
 requests==2.31.0
 gunicorn
+please switch to js or typescript...can't understand shit!!!
